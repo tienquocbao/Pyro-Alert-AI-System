@@ -17,7 +17,7 @@ from ultralytics import YOLO
 # ================= CẤU HÌNH HỆ THỐNG & THÔNG BÁO =================
 
 # 1. Cấu hình Model & Video
-MODEL_PATH = "models/Yolov8s-50epochs.pt"
+MODEL_PATH = "models/Yolov8s-50epochs.engine"
 VIDEO_PATHS = ["videos/firevid2.mp4", "videos/nonfirevid1.mp4", "videos/nonfirevid2.mp4", "videos/nonfirevid3.mp4"]
 OUTPUT_DIR = "runs/alerts"
 CONF_THRESHOLD = 0.45
@@ -104,13 +104,12 @@ class NotificationSystem:
         t1.start()
         t2.start()
 
-# ================= CLASS XỬ LÝ CAMERA (CHỈ RESIZE - KHÔNG SKIP FRAME) =================
+# ================= CLASS XỬ LÝ CAMERA (ĐÃ TỐI ƯU FPS) =================
 class CameraAgent:
     def __init__(self, cam_id, source_path):
         self.cam_id = cam_id
         self.cap = cv2.VideoCapture(source_path)
         
-        # Buffer ghi hình
         self.buffer = deque(maxlen=PRE_PADDING)
         self.is_recording = False
         self.recording_writer = None
@@ -118,13 +117,15 @@ class CameraAgent:
         self.current_filename = ""
         self.last_alert_time = 0 
 
-        # Thông số gốc của video
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
-        
-        # Kích thước ảnh đầu vào cho AI (Chuẩn YOLOv8 là 640)
-        self.AI_SIZE = 640 
+
+        # --- BIẾN TỐI ƯU FPS ---
+        self.frame_count = 0
+        self.DETECT_INTERVAL = 4  # Chỉ detect mỗi 4 frame (Detect 1, nghỉ 3)
+        self.last_boxes = []      # Lưu kết quả detect cũ để vẽ lại
+        self.is_fire_detected = False
 
     def read_frame(self):
         ret, frame = self.cap.read()
@@ -134,57 +135,60 @@ class CameraAgent:
         return ret, frame
 
     def process_logic(self, frame):
-        # 1. Chuẩn bị Frame hiển thị (Giữ nguyên gốc)
-        display_frame = frame.copy()
-
-        # 2. Resize Frame cho AI (Giảm tải cho GPU)
-        # YOLOv8 được train trên ảnh vuông 640x640, nên resize về đây là nhanh và chuẩn nhất
-        ai_frame = cv2.resize(frame, (self.AI_SIZE, self.AI_SIZE))
-
-        # 3. Chạy Detect (Chạy trên mọi frame, không skip)
-        results = model(ai_frame, verbose=False, conf=CONF_THRESHOLD, iou=0.45, device=0)
+        self.frame_count += 1
+        display_frame = frame.copy() # Frame gốc để lưu video/vẽ
         
-        detected = False
+        # --- TỐI ƯU 1: RESIZE TRƯỚC KHI DETECT ---
+        # Chỉ resize ảnh đưa vào AI, không resize ảnh gốc (để video lưu lại vẫn nét)
+        # Resize về kích thước 640 để YOLO xử lý nhanh nhất
+        ai_frame = cv2.resize(frame, (640, 640)) 
+
+        # --- TỐI ƯU 2: FRAME SKIPPING (Detect mỗi N frame) ---
+        if self.frame_count % self.DETECT_INTERVAL == 0:
+            # Chạy YOLO trên ảnh đã resize
+            results = model(ai_frame, verbose=False, conf=CONF_THRESHOLD, iou=0.45, device=0)
+            
+            self.last_boxes = []
+            self.is_fire_detected = False
+            
+            for r in results:
+                boxes = r.boxes
+                for box in boxes:
+                    cls = int(box.cls[0])
+                    if cls == CLASS_ID_FIRE:
+                        self.is_fire_detected = True
+                        # Cần tính tỉ lệ để map box từ ảnh 640x640 về ảnh gốc
+                        scale_x = self.width / 640
+                        scale_y = self.height / 640
+                        
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy() # Lấy toạ độ
+                        
+                        # Scale toạ độ về kích thước thật
+                        real_box = (int(x1 * scale_x), int(y1 * scale_y), int(x2 * scale_x), int(y2 * scale_y))
+                        self.last_boxes.append(real_box)
         
-        # Tính tỷ lệ để phóng to toạ độ box từ 640x640 về kích thước thật
-        scale_x = self.width / self.AI_SIZE
-        scale_y = self.height / self.AI_SIZE
+        # --- VẼ LẠI CÁC BOX TỪ KẾT QUẢ CŨ (HOẶC MỚI) ---
+        # Dù không chạy detect frame này, ta vẫn vẽ lại box của lần detect trước
+        for (x1, y1, x2, y2) in self.last_boxes:
+            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            cv2.putText(display_frame, f"FIRE {self.cam_id}", (x1, y1 - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-        for r in results:
-            boxes = r.boxes
-            for box in boxes:
-                cls = int(box.cls[0])
-                if cls == CLASS_ID_FIRE:
-                    detected = True
-                    
-                    # Lấy toạ độ trên ảnh nhỏ (ai_frame)
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    
-                    # Scale toạ độ về ảnh lớn (display_frame)
-                    real_x1 = int(x1 * scale_x)
-                    real_y1 = int(y1 * scale_y)
-                    real_x2 = int(x2 * scale_x)
-                    real_y2 = int(y2 * scale_y)
-
-                    # Vẽ box lên ảnh gốc
-                    cv2.rectangle(display_frame, (real_x1, real_y1), (real_x2, real_y2), (0, 0, 255), 2)
-                    cv2.putText(display_frame, f"FIRE {self.cam_id}", (real_x1, real_y1 - 10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-        # 4. Logic Thông Báo & Ghi Hình (Giữ nguyên như cũ)
+        # --- LOGIC THÔNG BÁO & GHI HÌNH (Giữ nguyên) ---
         current_timestamp = time.time()
         current_time_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        if detected:
+        # Dùng biến is_fire_detected đã được cache
+        if self.is_fire_detected:
             if current_timestamp - self.last_alert_time > NOTIFICATION_COOLDOWN:
-                # Gửi ảnh display_frame (ảnh nét) đi cảnh báo
-                NotificationSystem.trigger_alerts(self.cam_id, display_frame)
+                # Chạy thread gửi thông báo...
+                NotificationSystem.trigger_alerts(self.cam_id, display_frame) # Gửi ảnh có vẽ box
                 self.last_alert_time = current_timestamp
                 GlobalState.should_play_sound = True
 
         if not self.is_recording:
-            self.buffer.append(frame) # Lưu frame gốc vào buffer
-            if detected:
+            self.buffer.append(frame) # Lưu frame gốc sạch vào buffer
+            if self.is_fire_detected:
                 self.is_recording = True
                 self.current_filename = f"{self.cam_id}_{current_time_str}.mp4"
                 save_path = os.path.join(OUTPUT_DIR, self.current_filename)
@@ -194,7 +198,7 @@ class CameraAgent:
                 self.recording_writer.write(frame)
                 GlobalState.alerts.insert(0, {"cam": self.cam_id, "time": datetime.datetime.now().strftime("%H:%M:%S"), "file": self.current_filename})
         else:
-            if detected:
+            if self.is_fire_detected:
                 self.post_record_counter = POST_PADDING
                 self.recording_writer.write(frame)
             else:
