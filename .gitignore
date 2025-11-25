@@ -1,0 +1,38 @@
+
+## Bỏ qua thư mục ảo python
+#venv/
+#__pycache__/
+#
+## Bỏ qua file video input (vì nặng, ai clone về tự bỏ video của họ vào)
+#*.mp4
+#*.avi
+#*.mkv
+#
+## Bỏ qua thư mục chứa video đã cắt (output)
+#runs/
+#
+## Bỏ qua file model (nếu file này > 100MB thì github không cho up, nếu nhẹ thì giữ lại)
+## *.pt 
+#
+## File hệ thống
+#.DS_Store
+#.idea/
+#.vscode/# Bỏ qua thư mục ảo python
+#venv/
+#__pycache__/
+#
+## Bỏ qua file video input (vì nặng, ai clone về tự bỏ video của họ vào)
+#*.mp4
+#*.avi
+#*.mkv
+#
+## Bỏ qua thư mục chứa video đã cắt (output)
+#runs/
+#
+## Bỏ qua file model (nếu file này > 100MB thì github không cho up, nếu nhẹ thì giữ lại)
+## *.pt 
+#
+## File hệ thống
+#.DS_Store
+#.idea/
+#.vscode/
